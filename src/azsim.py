@@ -117,8 +117,8 @@ class Subsc:
         for label, data in bars:
             ax.bar(periods[s:], data, bottom=bottom, label=label)
             bottom = [x + y for x, y in zip(bottom, data)]
-        lines = [("used", self.hist_used[s:]),
-                 ("S", self.hist_S[s:])]
+        lines = [("used", "black", self.hist_used[s:]),
+                 ("S",    "yellow", self.hist_S[s:])]
         # [0,1,2,3] ->
         # [0,1,1,2,2,3,3,4] - 0.5
         if n_periods > 0:
@@ -126,14 +126,14 @@ class Subsc:
             periods_ = [x - 0.5 for x in (periods[s:] + [last_period + 1]) for _ in range(2)][1:-1]
         else:
             periods_ = []
-        for label, data in lines:
+        for label, color, data in lines:
             # convert data like
             #    [0,1,2,3]
             #    [a,b,c,d]
             # -> [0,1,1,2,2,3,3,4]
             #    [a,a,b,b,c,c,d,d]
             data_    = [x for x in data    for _ in range(2)]
-            ax.plot(periods_, data_, label=label, lw=2)
+            ax.plot(periods_, data_, label=label, lw=2, color=color)
         ax.set_ylim(bottom=0.0)
         ax.set_title(title)
         ax.legend()
@@ -334,7 +334,7 @@ def parse_opt_and_set_defaults(opt, script):
     defaults = [
         ("script",             None,       str),
         ("hist",               "hist.csv", str),
-        ("C0",                 1.5e7,      float),
+        ("C0",                 1.5e8,      float),
         ("n_budget_periods",   60,         int),
         ("period",             None,       parse_opt_period_list),
         ("start_t",            1,          int),
@@ -366,36 +366,50 @@ def parse_opt_and_set_defaults(opt, script):
             len_used = max(len(sc["used"]) for sc in script.values())
             opt.end_t = opt.start_t + len_used - 1
         else:
-            # 終わりまで
+            # そうでなければ予算の終わりまで
             opt.end_t = opt.n_budget_periods
     else:
+        # end_t の指定有り. 数字として読めるかどうかを調べる
         opt.end_t = parse_num(opt.end_t, opt.end_t)
     if opt.period is None:
+        # period が指定なし
         if isinstance(opt.end_t, type(0)):
+            # end_t が数字の場合 -> start_t と end_t から生成
             end_t = opt.end_t
             opt.period = [date_str(i) for i in range(opt.start_t, end_t + 1)]
         else:
+            # end_t が数字じゃない場合 -> エラー
             print(f"couldn't parse --end-t ({opt.end_t}) as an integer")
             print("either specify '--period' as a list of symbols"
                   " or '--end-t' as an index to the periods")
             return 0        # NG
     elif opt.end_t in opt.period:
+        # period 指定有り
+        # end_t が period に含まれていればそこまで
         end_idx = opt.period.index(opt.end_t)
-        opt.period = opt.period[:end_idx]
+        opt.period = opt.period[:end_idx + 1]
     else:
+        # end_t が period に含まれていない
+        # end_t が数字ならばそのindexまで
         end_idx = parse_num(opt.end_t, None)
         if end_idx is not None:
-            opt.period = opt.period[:end_idx]
+            # opt.period[0] <=> globalの start_idx
+            # opt.period[?] <=> globalの end_idx
+            opt.period = opt.period[:end_idx - start_idx + 1]
         else:
             print(f"couldn't find --end-t ({opt.end_t}) in --period list")
             return 0        # NG
     if opt.settle_period is None:
         # say settle_period is 6, then we settle on
         # 6, 12, 18, ...
-        # if sart_t = 4, then, they are period[2], period[8], ..
-        start_idx = opt.settle_interval - opt.start_t % opt.settle_interval
-        settle_idxs = list(range(start_idx, opt.end_t + 1, opt.settle_interval))
-        opt.settle_period = [opt.period[i] for i in settle_idxs]
+        # if start_t = 4, then, they are period[2], period[8], ..
+        # t=4       t=5       t=6            t=end_t          
+        # period[0] period[1] period[2]  ... period[end_t-4]
+        # start_idx = opt.settle_interval - opt.start_t % opt.settle_interval
+        # settle_idxs = list(range(start_idx, opt.end_t + 1, opt.settle_interval))
+        n_periods = len(opt.period)
+        settle_idxs = [ x for x in range(opt.start_t, opt.start_t + n_periods) if x % opt.settle_interval == 0]
+        opt.settle_period = [opt.period[i - opt.start_t] for i in settle_idxs]
     global DBG
     DBG = opt.dbg
     return 1
@@ -419,7 +433,7 @@ def read_script(script_csv, opt):
     cfg = {}
     subsc_id_dict = {}   # subsc_id_id -> Subsc obj
     subsc_id_keys = []   # subsc_id_dict.keys() in the insertion order
-    n_vals = 0
+    #n_vals = 0
     with open(script_csv, encoding="UTF-8") as fp:
         rp = csv.reader(fp)
         for i, row in enumerate(rp):
@@ -442,13 +456,14 @@ def read_script(script_csv, opt):
                     subsc_id_keys.append(subsc_id)
                 if attr in ["weight", "used"]:
                     val_cols = row[2:]
-                    n_vals = max(n_vals, len(val_cols))
+                    #n_vals = max(n_vals, len(val_cols))
                     vals = [parse_num(x, "") for x in val_cols]
                     if DBG>=2:
                         print(f'set Subsc("{subsc_id}").{attr} = {vals}')
                     sc[attr] = vals
     cfg["script"] = [(subsc_id, subsc_id_dict[subsc_id]) for subsc_id in subsc_id_keys]
-    return cfg, n_vals
+    #return cfg, n_vals
+    return cfg
 
 class scenario_generator:
     """
@@ -456,17 +471,18 @@ class scenario_generator:
     """
     def __init__(self, opt):
         if opt.script is not None:
-            cfg, n_vals = read_script(opt.script, opt)
+            #cfg, n_vals = read_script(opt.script, opt)
+            cfg = read_script(opt.script, opt)
             opt_dict = vars(opt)
             for k, v in opt_dict.items():
                 if v is None:
                     opt_dict[k] = cfg.get(k)
             script = cfg["script"]
             self.script = dict(script)
-            self.n_vals = n_vals
+            # self.n_vals = n_vals
         else:
             self.script = None
-            self.n_vals = None
+            # self.n_vals = None
         self.ok = parse_opt_and_set_defaults(opt, self.script)
         # 失敗していることがある
         self.opt = opt
@@ -480,10 +496,10 @@ class scenario_generator:
         """
         new_subscs = []
         script = self.script
-        if script is not None and t_idx < self.n_vals:
+        if script is not None: # and t_idx < self.n_vals:
             for subsc_id, sb_script in script.items():
                 used = sb_script["used"]
-                if all(x == "" for x in used[:t_idx]) and used[t_idx] != "":
+                if all(x == "" for x in used[:t_idx]) and t_idx < len(used) and used[t_idx] != "":
                     if DBG>=2:
                         print(f"t {t_idx} {t} gen_new_subscs : add subsc from script {subsc_id}")
                     assert(subsc_id not in self.subscs), (subsc_id, self.subscs)
@@ -505,14 +521,6 @@ class scenario_generator:
                 new_subscs.append(Subsc(subsc_id, t_idx))
         return new_subscs
 
-    def gen_delta_subscs(self, _t_idx, _t):
-        """
-        t期の追加サブスク数
-        (script の場合とシミュレーションの場合を両立させる)
-        """
-        r = self.rg.random()
-        return int(self.opt.mean_delta_subscs * r)
-
     def gen_subsc_weight(self, t_idx, _t, sb):
         """
         t期のsubsc sbの重み
@@ -525,6 +533,8 @@ class scenario_generator:
                 return None # no change
             elif t_idx < len(weights):
                 return weights[t_idx]
+            else:
+                return None     # no change
         r = self.rg.random()
         if r < self.opt.weight_change_prob:
             # change
@@ -544,6 +554,8 @@ class scenario_generator:
             used = sb_script["used"]
             if t_idx < len(used):
                 return used[t_idx]
+            else:
+                return 0.0
         W = sum(sb.weight for sb in subscs)
         algo = self.opt.user_algo
         if algo == USER_ALGO_C0:
@@ -875,7 +887,7 @@ class Simulator:
         """
         new_C = self.C - W1
         if DBG>=2:
-            print(f"t {t_idx} {t} update_C_at_period : do_settle [do_settle] update C to reflect discount"
+            print(f"t {t_idx} {t} update_C_at_period : do_settle [{do_settle}] update C to reflect discount"
                   f" C [{self.C:.2f}] -= W1 [{W1:.2f}] -> {new_C:.2f}")
         assert(new_C >= -1.0e-7), (self.C, W1)
         if new_C < 0.0:
@@ -978,10 +990,12 @@ class Simulator:
                 axes = axes.reshape(-1)
             # periods = list(range(self.opt.start_t, self.opt.end_t + 1))
             periods = list(range(len(self.opt.period)))
-            axes[0].plot(periods, self.hist_T, label="target")
-            axes[0].plot(periods, self.hist_C, label="actual")
-            axes[0].set_ylim(bottom=0.0)
-            axes[0].legend()
+            ax = axes[0]
+            ax.plot(periods, self.hist_T, label="target")
+            ax.plot(periods, self.hist_C, label="actual")
+            ax.set_ylim(bottom=0.0)
+            ax.legend()
+            ax.set_title("remaining credit")
             subscs_dict = {sb.subsc_id : sb for sb in self.subscs}
             for subsc_id, ax in zip(self.opt.plots, axes[1:]):
                 sb = subscs_dict.get(subsc_id)
